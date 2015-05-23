@@ -23,7 +23,7 @@
  * Binary distributions must follow the binary distribution requirements of
  * either License.
  */
-
+#define RT_DEBUG
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -101,10 +101,33 @@ int main(int argc, char** argv) {
 	printf ("Number of devices found: %d\n", nr_devices);
 	#endif
 
-	/* default to 0th device, otherwise rely on commandline inputs */
+	/* default to 0th device, choose based on command line if more than one exists, and exit if none are detected */
 	user_device_number = 0;
-	if (argc > 1) {
+	if (argc > 1 && nr_devices > 1) {
 		user_device_number = atoi(argv[1]);
+	} else if (nr_devices < 1) {
+		printf("No devices detected");
+		freenect_shutdown(f_ctx);
+		return 1;
 	}
+
+	if (freenect_open_device(f_ctx, &f_dev, user_device_number) < 0) {
+		printf("Could not open device\n");
+		freenect_shutdown(f_ctx);
+		return 1;
+	}
+
+
+	res = pthread_create(&freenect_thread, NULL, freenect_threadfunc, NULL);
+	if (res) {
+		printf("pthread_create failed\n");
+		freenect_shutdown(f_ctx);
+		return 1;
+	}
+
+	/* OS X requires GLUT to run on the main thread */
+	gl_threadfunc(NULL);
+
+	return 0;
 
 }
