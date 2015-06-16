@@ -40,6 +40,7 @@
 #include <GL/glut.h>
 #endif
 
+#define _USE_MATH_DEFINES
 #include <math.h>
 
 pthread_t freenect_thread;
@@ -53,6 +54,9 @@ pthread_mutex_t gl_backbuf_mutex = PTHREAD_MUTEX_INITIALIZER;
 // front: owned by GL, "currently being drawn"
 uint8_t *depth_mid, *depth_front;
 //uint8_t *rgb_back, *rgb_mid, *rgb_front;
+
+int g_argc;
+char **g_argv;
 
 GLuint gl_depth_tex;
 //GLuint gl_rgb_tex;
@@ -68,6 +72,8 @@ int freenect_led;
 freenect_video_format requested_format = FREENECT_VIDEO_RGB;
 freenect_video_format current_format = FREENECT_VIDEO_RGB;
 
+uint16_t t_gamma[2048];
+
 pthread_cond_t gl_frame_cond = PTHREAD_COND_INITIALIZER;
 int got_depth = 0;
 
@@ -80,6 +86,15 @@ void InitGL(int, int);
 void DrawGLScene();
 
 void keyPressed(unsigned char key, int x, int y) {
+	if (key == 27) {
+		die = 1;
+		pthread_join(freenect_thread, NULL);
+		glutDestroyWindow(window);
+		free(depth_mid);
+		free(depth_front);
+		// Not pthread_exit because OSX leaves a thread lying around and doesn't exit
+		exit(0);
+	}
 	return;
 }//empty key functionality for now
 
@@ -91,6 +106,8 @@ int main(int argc, char** argv) {
 	depth_mid = (uint8_t*)malloc(640*480*3);
 	depth_front = (uint8_t*)malloc(640*480*3);
 
+	g_argc = argc;
+	g_argv = argv;
 
 	for (i=0; i<2048; i++) {
 		float v = i/2048.0;
@@ -138,6 +155,27 @@ int main(int argc, char** argv) {
 	gl_threadfunc(NULL);
 
 	return 0;
+}
+
+void InitGL(int Width, int Height)
+{
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	//glClearDepth(0.0);
+	//glDepthFunc(GL_LESS);
+	//glDepthMask(GL_FALSE);
+	glDisable(GL_DEPTH_TEST);
+	glDisable(GL_BLEND);
+	glDisable(GL_ALPHA_TEST);
+	glEnable(GL_TEXTURE_2D);
+	glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	glShadeModel(GL_FLAT);
+
+	glGenTextures(1, &gl_depth_tex);
+	glBindTexture(GL_TEXTURE_2D, gl_depth_tex);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	ReSizeGLScene(Width, Height);
 }
 
 void *freenect_threadfunc(void *arg) {
@@ -243,12 +281,6 @@ void DrawGLScene()
 	glEnd();
 	glPopMatrix();
 
-	glBindTexture(GL_TEXTURE_2D, gl_rgb_tex);
-	if (current_format == FREENECT_VIDEO_RGB || current_format == FREENECT_VIDEO_YUV_RGB)
-		glTexImage2D(GL_TEXTURE_2D, 0, 3, 640, 480, 0, GL_RGB, GL_UNSIGNED_BYTE, rgb_front);
-	else
-		glTexImage2D(GL_TEXTURE_2D, 0, 1, 640, 480, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, rgb_front+640*4);
-
 	glPushMatrix();
 	glTranslatef(640+(640.0/2.0),(480.0/2.0) ,0.0);
 	glRotatef(camera_angle, 0.0, 0.0, 1.0);
@@ -263,6 +295,16 @@ void DrawGLScene()
 	glEnd();
 	glPopMatrix();
 	glutSwapBuffers();
+}
+
+void ReSizeGLScene(int Width, int Height) {
+	glViewport(0,0,Width,Height);
+	glMatrixMode(GL_PROJECTION);
+	glLoadIdentity();
+	glOrtho (0, 640, 0, 480, -5.0f, 5.0f);
+	glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
 }
 
 void depth_cb(freenect_device *dev, void *v_depth, uint32_t timestamp) {
