@@ -26,6 +26,12 @@
 
 #define RT_DEBUG
 
+#define GL_CONTENT_DEBUG
+#ifdef GL_CONTENT_DEBUG
+#include <inttypes.h>
+#endif
+
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -53,6 +59,9 @@ pthread_mutex_t gl_backbuf_mutex = PTHREAD_MUTEX_INITIALIZER;
 // mid: owned by callbacks, "latest frame ready"
 // front: owned by GL, "currently being drawn"
 uint8_t *depth_mid, *depth_front;
+uint8_t *last_frame_clone; //a dump to store the frame currently being pushed
+						  //used to obtain a more stable output by comparing the two buffers
+
 //uint8_t *rgb_back, *rgb_mid, *rgb_front;
 
 int g_argc;
@@ -84,6 +93,7 @@ void *freenect_threadfunc(void *);
 void ReSizeGLScene(int, int);
 void InitGL(int, int);
 void DrawGLScene();
+void render_contour(uint8_t *);
 
 void keyPressed(unsigned char key, int x, int y) {
 	if (key == 27) {
@@ -105,6 +115,7 @@ int main(int argc, char** argv) {
 	int user_device_number;
 	depth_mid = (uint8_t*)malloc(640*480*3);
 	depth_front = (uint8_t*)malloc(640*480*3);
+	last_frame_clone = (uint8_t*)malloc(640*480*3);
 
 	g_argc = argc;
 	g_argv = argv;
@@ -114,6 +125,13 @@ int main(int argc, char** argv) {
 		v = powf(v, 3)* 6;
 		t_gamma[i] = v*6*256;
 	}
+
+	#ifdef GL_CONTENT_DEBUG
+	int qtp;
+	for(qtp = 0; qtp < 2048; qtp+=50) {
+		printf("%" PRIu8 "\n", t_gamma[qtp]);
+	}
+	#endif
 
 	if (freenect_init(&f_ctx, NULL) < 0) {
 		fprintf(stderr, "freenect_init() failed\n");
@@ -170,6 +188,8 @@ void InitGL(int Width, int Height)
 	glBlendFunc (GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
 	glShadeModel(GL_FLAT);
 
+	glEnable(GL_MULTISAMPLE);
+
 	glGenTextures(1, &gl_depth_tex);
 	glBindTexture(GL_TEXTURE_2D, gl_depth_tex);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -213,7 +233,8 @@ void *gl_threadfunc(void *arg) {
 
 	glutInit(&g_argc, g_argv);
 
-	glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_ALPHA | GLUT_DEPTH);
+	glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_ALPHA | GLUT_DEPTH | GLUT_MULTISAMPLE);
+	
 	glutInitWindowSize(640, 480);
 	glutInitWindowPosition(0, 0);
 
@@ -268,6 +289,7 @@ void DrawGLScene()
 	camera_angle = 0.0;
 
 	glLoadIdentity();
+	
 	glPushMatrix();
 	glTranslatef((640.0/2.0),(480.0/2.0) ,0.0);
 	glRotatef(camera_angle, 0.0, 0.0, 1.0);
@@ -280,7 +302,7 @@ void DrawGLScene()
 	glTexCoord2f(0, 0); glVertex3f(0,480,1.0);
 	glEnd();
 	glPopMatrix();
-
+	
 	glPushMatrix();
 	glTranslatef(640+(640.0/2.0),(480.0/2.0) ,0.0);
 	glRotatef(camera_angle, 0.0, 0.0, 1.0);
@@ -294,7 +316,20 @@ void DrawGLScene()
 	glTexCoord2f(0, 0); glVertex3f(640,480,0);
 	glEnd();
 	glPopMatrix();
+	
+	render_contour(depth_front);
+	memmove(last_frame_clone, depth_front, 640*480*3);
+
 	glutSwapBuffers();
+}
+
+void render_contour(uint8_t * m) {
+	int q;
+	for(q=0;q<640*480*3;q++) {
+		m[q] = m[q]/2;
+		m[q] += (last_frame_clone[q]/2);
+	}
+	return;
 }
 
 void ReSizeGLScene(int Width, int Height) {
@@ -304,55 +339,62 @@ void ReSizeGLScene(int Width, int Height) {
 	glOrtho (0, 640, 0, 480, -5.0f, 5.0f);
 	glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
-
 }
 
 void depth_cb(freenect_device *dev, void *v_depth, uint32_t timestamp) {
 	int i;
+	int pval;
+	int lb;
 	uint16_t *depth = (uint16_t*)v_depth;
 
 	pthread_mutex_lock(&gl_backbuf_mutex);
+	
 	for (i=0; i<640*480; i++) {
-		int pval = t_gamma[depth[i]];
-		int lb = pval & 0xff;
+		pval = t_gamma[depth[i]];
+		lb = pval & 0xff;
 		switch (pval>>8) {
 			case 0:
-				depth_mid[3*i+0] = 255;
-				depth_mid[3*i+1] = 255-lb;
-				depth_mid[3*i+2] = 255-lb;
+				depth_mid[(3*i)+0] = 255;
+				depth_mid[(3*i)+1] = 255-lb;
+				depth_mid[(3*i)+2] = 255-lb;
 				break;
 			case 1:
-				depth_mid[3*i+0] = 255;
-				depth_mid[3*i+1] = lb;
-				depth_mid[3*i+2] = 0;
+				depth_mid[(3*i)+0] = 255;
+				depth_mid[(3*i)+1] = lb;
+				depth_mid[(3*i)+2] = 0;
 				break;
 			case 2:
-				depth_mid[3*i+0] = 255-lb;
-				depth_mid[3*i+1] = 255;
-				depth_mid[3*i+2] = 0;
+				depth_mid[(3*i)+0] = 255-lb;
+				depth_mid[(3*i)+1] = 255;
+				depth_mid[(3*i)+2] = 0;
 				break;
 			case 3:
-				depth_mid[3*i+0] = 0;
-				depth_mid[3*i+1] = 255;
-				depth_mid[3*i+2] = lb;
+				depth_mid[(3*i)+0] = 0;
+				depth_mid[(3*i)+1] = 255;
+				depth_mid[(3*i)+2] = lb;
 				break;
 			case 4:
-				depth_mid[3*i+0] = 0;
-				depth_mid[3*i+1] = 255-lb;
-				depth_mid[3*i+2] = 255;
+				depth_mid[(3*i)+0] = 0;
+				depth_mid[(3*i)+1] = 255-lb;
+				depth_mid[(3*i)+2] = 255;
 				break;
 			case 5:
-				depth_mid[3*i+0] = 0;
-				depth_mid[3*i+1] = 0;
-				depth_mid[3*i+2] = 255-lb;
+				depth_mid[(3*i)+0] = 0;
+				depth_mid[(3*i)+1] = 0;
+				depth_mid[(3*i)+2] = 255-lb;
 				break;
 			default:
-				depth_mid[3*i+0] = 0;
-				depth_mid[3*i+1] = 0;
-				depth_mid[3*i+2] = 0;
+				/*depth_mid[(3*i)+0] = 0;
+				depth_mid[(3*i)+1] = 0;
+				depth_mid[(3*i)+2] = 0;*/
 				break;
 		}
 	}
+
+	/*for(i=0;i<640*480;i++) {
+		depth_mid[(3*i)] = (uint8_t)((depth[i]) % 256);
+	}*/
+
 	got_depth++;
 	pthread_cond_signal(&gl_frame_cond);
 	pthread_mutex_unlock(&gl_backbuf_mutex);
