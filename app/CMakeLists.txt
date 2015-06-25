@@ -17,4 +17,11 @@ if (Threads_FOUND AND OPENGL_FOUND AND GLUT_FOUND)
 
   install(TARGETS freenect-topography
           DESTINATION bin)
+
+  add_executable(osxcontour contour.c)
+
+  target_link_libraries(osxcontour freenect ${OPENGL_LIBRARIES} ${GLUT_LIBRARY} ${CMAKE_THREAD_LIBS_INIT} ${MATH_LIB})
+
+  install(TARGETS osxcontour
+          DESTINATION bin)
 endif ()
