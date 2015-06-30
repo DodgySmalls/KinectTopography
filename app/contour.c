@@ -27,6 +27,7 @@
 //inline defines simpler than arguments with cmake
 #define GLOBAL_DEBUG
 #define GL_DEBUG
+#define RT_DEBUG
 
 #ifdef GLOBAL_DEBUG
 #include <assert.h>
@@ -60,15 +61,17 @@
 /**
 		function headers
 **/
-struct colour8_t convertDepthToColour(uint16_t);
+//struct colour8_t convertDepthToColour(uint16_t);
 
+void depthCB(freenect_device *, void *, uint32_t);
+void * freenectThreadfunc(void *);
 void depthCallback(freenect_device *, void *, uint32_t);
 void drawGLScene();
 void resizeGLScene(int, int);
 void launchGL(int, char **);
 void keyPressed(unsigned char, int, int);
-void ** verifyMemory(void **);
-//void initKinect();
+void * verifyMemory(void *);
+void initKinect(int, char**);
 
 /** colour8_t 
 	A glob representing a pixel colour with 8 bit RGB depth
@@ -84,28 +87,88 @@ typedef struct {
 **/
 GLuint gl_depth_tex;
 int window;
-
 colour8_t * depth_front;
 colour8_t * depth_mid;
 colour8_t * frame_clone;
 
+volatile int die = 0;
+int got_depth = 0;
+pthread_mutex_t gl_backbuf_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t gl_frame_cond = PTHREAD_COND_INITIALIZER;
+pthread_t freenect_thread;
+
+
+freenect_context *f_ctx;
+freenect_device *f_dev;
+int freenect_led;
+freenect_video_format requested_format = FREENECT_VIDEO_RGB;
+freenect_video_format current_format = FREENECT_VIDEO_RGB;
+
+uint16_t t_gamma[2048];
+
+
 int main(int argc, char ** argv){
 	//allocate blocks of heap memory for frames
-	depth_front = (colour8_t *)malloc(DEPTH_CB_X * DEPTH_CB_Y * 3);
-	depth_mid = (colour8_t *)malloc(DEPTH_CB_X * DEPTH_CB_Y * 3);
-	frame_clone = (colour8_t *)malloc(DEPTH_CB_X * DEPTH_CB_Y * 3);
+	depth_front = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
+	depth_mid = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
+	frame_clone = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
 
-	//initKinect();
+	initKinect(argc, argv);
+
+	if (pthread_create(&freenect_thread, NULL, freenectThreadfunc, NULL) != 0) {
+		fprintf(stderr, "pthread_create failed\n");
+		freenect_shutdown(f_ctx);
+		return 1;
+	}
+
+			int i;
+			for (i=0; i<2048; i++) {
+				float v = i/2048.0;
+				v = powf(v, 3)* 6;
+				t_gamma[i] = v*6*256;
+			}
+
 	launchGL(argc, argv);
 	return 0;
 }
 
+void initKinect(int cargc, char ** cargv) {
+	int dev_count;
+	int user_device_number;
+
+	if (freenect_init(&f_ctx, NULL) < 0) {
+		fprintf(stderr, "freenect_init() failed\n");
+		exit(1);
+	}
+
+	dev_count = freenect_num_devices (f_ctx);
+	#ifdef RT_DEBUG
+	printf("Number of devices found: %d\n", dev_count);
+	#endif
+
+	freenect_set_log_level(f_ctx, FREENECT_LOG_DEBUG);
+	freenect_select_subdevices(f_ctx, (freenect_device_flags)(FREENECT_DEVICE_CAMERA));
+
+	/* device selection */
+	user_device_number = 0;
+	if (cargc > 1 && dev_count > 1) {
+		user_device_number = atoi(cargv[1]);
+	} else if (dev_count < 1) {
+		fprintf(stderr, "No devices detected");
+		freenect_shutdown(f_ctx);
+		exit(1);
+	}
+
+	if (freenect_open_device(f_ctx, &f_dev, user_device_number) < 0) {
+		fprintf(stderr, "Could not open device\n");
+		freenect_shutdown(f_ctx);
+		exit(1);
+	}
+
+}
+
 /** initializes and launches a glut window bound to the kinect's depth callback **/
 void launchGL(int g_argc, char ** g_argv) {
-		#ifdef GL_DEBUG
-		printf("GL thread\n");
-		#endif
-
 	glutInit(&g_argc, g_argv);
 	glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE | GLUT_ALPHA | GLUT_DEPTH | GLUT_MULTISAMPLE);
 	glutInitWindowSize(DEFAULT_WINDOW_X, DEFAULT_WINDOW_Y);
@@ -137,9 +200,172 @@ void launchGL(int g_argc, char ** g_argv) {
 	glutMainLoop();
 }
 
+
+void *freenectThreadfunc(void *arg) {
+	int tick = 0;
+
+	freenect_set_led(f_dev,LED_GREEN);
+	freenect_set_depth_callback(f_dev, depthCB);
+	//freenect_set_video_mode(f_dev, freenect_find_video_mode(FREENECT_RESOLUTION_MEDIUM, current_format));
+	freenect_set_depth_mode(f_dev, freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM, FREENECT_DEPTH_11BIT));
+
+	freenect_start_depth(f_dev);
+
+	while (!die && freenect_process_events(f_ctx) >= 0) {
+		//twiddle thumbs
+		tick++;
+	}
+	
+	#ifdef RT_DEBUG
+	printf("<freenectThreadfunc()> shutting down streams!\n");
+	#endif
+	
+	freenect_stop_depth(f_dev);
+	freenect_stop_video(f_dev);
+
+	freenect_close_device(f_dev);
+	freenect_shutdown(f_ctx);
+	#ifdef RT_DEBUG
+	printf("<freenectThreadfunc()> done!\n");
+	#endif
+	return NULL;
+}
+
+void depthCB(freenect_device *dev, void *v_depth, uint32_t timestamp) {
+	int i;
+	int pval;
+	int lb;
+	uint16_t *depth = (uint16_t*)v_depth;
+	
+	uint8_t * depth_midi = (uint8_t *)depth_mid;
+
+	pthread_mutex_lock(&gl_backbuf_mutex);
+	
+	for (i=0; i<640*480; i++) {
+		pval = t_gamma[depth[i]];
+		lb = pval & 0xff;
+		switch (pval>>8) {
+			case 0:
+				depth_midi[(3*i)+0] = 255;
+				depth_midi[(3*i)+1] = 255-lb;
+				depth_midi[(3*i)+2] = 255-lb;
+				break;
+			case 1:
+				depth_midi[(3*i)+0] = 255;
+				depth_midi[(3*i)+1] = lb;
+				depth_midi[(3*i)+2] = 0;
+				break;
+			case 2:
+				depth_midi[(3*i)+0] = 255-lb;
+				depth_midi[(3*i)+1] = 255;
+				depth_midi[(3*i)+2] = 0;
+				break;
+			case 3:
+				depth_midi[(3*i)+0] = 0;
+				depth_midi[(3*i)+1] = 255;
+				depth_midi[(3*i)+2] = lb;
+				break;
+			case 4:
+				depth_midi[(3*i)+0] = 0;
+				depth_midi[(3*i)+1] = 255-lb;
+				depth_midi[(3*i)+2] = 255;
+				break;
+			case 5:
+				depth_midi[(3*i)+0] = 0;
+				depth_midi[(3*i)+1] = 0;
+				depth_midi[(3*i)+2] = 255-lb;
+				break;
+			default:
+				/*depth_midi[(3*i)+0] = 0;
+				depth_midi[(3*i)+1] = 0;
+				depth_midi[(3*i)+2] = 0;*/
+				break;
+		}
+	}
+
+	/*for(i=0;i<640*480;i++) {
+		depth_mid[(3*i)] = (uint8_t)((depth[i]) % 256);
+	}*/
+
+	got_depth++;
+	pthread_cond_signal(&gl_frame_cond);
+	pthread_mutex_unlock(&gl_backbuf_mutex);
+}
+
 //Attemps to pull data from the kinect's depth camera and draw the next frame using it.
 void drawGLScene() {
 	
+	pthread_mutex_lock(&gl_backbuf_mutex);
+
+	// When using YUV_RGB mode, RGB frames only arrive at 15Hz, so we shouldn't force them to draw in lock-step.
+	// However, this is CPU/GPU intensive when we are receiving frames in lockstep.
+	if (current_format == FREENECT_VIDEO_YUV_RGB) {
+		while (!got_depth) {
+			pthread_cond_wait(&gl_frame_cond, &gl_backbuf_mutex);
+		}
+	} /*else {
+		while ((!got_depth || !got_rgb) && requested_format != current_format) {
+			pthread_cond_wait(&gl_frame_cond, &gl_backbuf_mutex);
+		}
+	}*/
+
+	if (requested_format != current_format) {
+		pthread_mutex_unlock(&gl_backbuf_mutex);
+		return;
+	}
+
+	colour8_t *tmp;
+
+	if (got_depth) {
+		tmp = depth_front;
+		depth_front = depth_mid;
+		depth_mid = tmp;
+		got_depth = 0;
+	}
+
+
+	//pthread_mutex_unlock(&gl_backbuf_mutex);
+	glBindTexture(GL_TEXTURE_2D, gl_depth_tex);
+	glTexImage2D(GL_TEXTURE_2D, 0, 3, 640, 480, 0, GL_RGB, GL_UNSIGNED_BYTE, (uint8_t *)depth_front);
+
+	/* visual test code
+	int asd = 0;
+
+	for(asd = 0; asd < 640*480; asd++) {
+		depth_front[asd].green += 1;
+		/*depth_front[asd].green += 2;
+		depth_front[asd].blue += 3;*/
+	//}
+
+
+	glLoadIdentity();
+	
+	glPushMatrix();
+	glTranslatef((640.0/2.0),(480.0/2.0) ,0.0);
+	glTranslatef(-(640.0/2.0),-(480.0/2.0) ,0.0);
+	glBegin(GL_TRIANGLE_FAN);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	glTexCoord2f(0, 1); glVertex3f(0,0,1.0);
+	glTexCoord2f(1, 1); glVertex3f(640,0,1.0);
+	glTexCoord2f(1, 0); glVertex3f(640,480,1.0);
+	glTexCoord2f(0, 0); glVertex3f(0,480,1.0);
+	glEnd();
+	glPopMatrix();
+	
+	glPushMatrix();
+	glTranslatef(640+(640.0/2.0),(480.0/2.0) ,0.0);
+	glTranslatef(-(640+(640.0/2.0)),-(480.0/2.0) ,0.0);
+
+	glBegin(GL_TRIANGLE_FAN);
+	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
+	glTexCoord2f(0, 1); glVertex3f(640,0,0);
+	glTexCoord2f(1, 1); glVertex3f(640,0,0);
+	glTexCoord2f(1, 0); glVertex3f(640,480,0);
+	glTexCoord2f(0, 0); glVertex3f(640,480,0);
+	glEnd();
+	glPopMatrix();
+
+
 	glutSwapBuffers();
 }
 
@@ -147,7 +373,7 @@ void resizeGLScene(int Width, int Height) {
 	glViewport(0,0,Width,Height);
 	glMatrixMode(GL_PROJECTION);
 	glLoadIdentity();
-	glOrtho (0, 1280, 0, 480, -5.0f, 5.0f);
+	glOrtho (0, 640, 0, 480, -5.0f, 5.0f);
 	glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 }
@@ -168,8 +394,8 @@ void keyPressed(unsigned char key, int x, int y) {
 }
 
 //graceful exit from failed heap allocation
-void ** verifyMemory(void ** p) {
-	if(*p == NULL) {
+void * verifyMemory(void * p) {
+	if(p == NULL) {
 		fprintf(stderr, "Failed to allocate memory, exiting");
 		exit(0);
 	}
