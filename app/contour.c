@@ -58,6 +58,7 @@
 #define DEPTH_CB_X 640
 #define DEPTH_CB_Y 480
 
+#define DEPTH_CB_RANGE 2048
 /**
 		function headers
 **/
@@ -129,6 +130,7 @@ int main(int argc, char ** argv){
 			}
 
 	launchGL(argc, argv);
+
 	return 0;
 }
 
@@ -147,7 +149,7 @@ void initKinect(int cargc, char ** cargv) {
 	#endif
 
 	freenect_set_log_level(f_ctx, FREENECT_LOG_DEBUG);
-	freenect_select_subdevices(f_ctx, (freenect_device_flags)(FREENECT_DEVICE_CAMERA));
+    freenect_select_subdevices(f_ctx, (freenect_device_flags)(FREENECT_DEVICE_MOTOR | FREENECT_DEVICE_CAMERA)); 
 
 	/* device selection */
 	user_device_number = 0;
@@ -164,7 +166,6 @@ void initKinect(int cargc, char ** cargv) {
 		freenect_shutdown(f_ctx);
 		exit(1);
 	}
-
 }
 
 /** initializes and launches a glut window bound to the kinect's depth callback **/
@@ -196,7 +197,6 @@ void launchGL(int g_argc, char ** g_argv) {
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
 	resizeGLScene(DEFAULT_WINDOW_X, DEFAULT_WINDOW_Y);
-
 	glutMainLoop();
 }
 
@@ -231,6 +231,7 @@ void *freenectThreadfunc(void *arg) {
 	return NULL;
 }
 
+//draws the frame dictated by the kinect's depth callback into depth_mid
 void depthCB(freenect_device *dev, void *v_depth, uint32_t timestamp) {
 	int i;
 	int pval;
@@ -242,7 +243,7 @@ void depthCB(freenect_device *dev, void *v_depth, uint32_t timestamp) {
 	pthread_mutex_lock(&gl_backbuf_mutex);
 	
 	for (i=0; i<640*480; i++) {
-		pval = t_gamma[depth[i]];
+		val = t_gamma[depth[i]];
 		lb = pval & 0xff;
 		switch (pval>>8) {
 			case 0:
@@ -283,10 +284,6 @@ void depthCB(freenect_device *dev, void *v_depth, uint32_t timestamp) {
 		}
 	}
 
-	/*for(i=0;i<640*480;i++) {
-		depth_mid[(3*i)] = (uint8_t)((depth[i]) % 256);
-	}*/
-
 	got_depth++;
 	pthread_cond_signal(&gl_frame_cond);
 	pthread_mutex_unlock(&gl_backbuf_mutex);
@@ -294,7 +291,7 @@ void depthCB(freenect_device *dev, void *v_depth, uint32_t timestamp) {
 
 //Attemps to pull data from the kinect's depth camera and draw the next frame using it.
 void drawGLScene() {
-	
+
 	pthread_mutex_lock(&gl_backbuf_mutex);
 
 	// When using YUV_RGB mode, RGB frames only arrive at 15Hz, so we shouldn't force them to draw in lock-step.
@@ -303,11 +300,7 @@ void drawGLScene() {
 		while (!got_depth) {
 			pthread_cond_wait(&gl_frame_cond, &gl_backbuf_mutex);
 		}
-	} /*else {
-		while ((!got_depth || !got_rgb) && requested_format != current_format) {
-			pthread_cond_wait(&gl_frame_cond, &gl_backbuf_mutex);
-		}
-	}*/
+	}
 
 	if (requested_format != current_format) {
 		pthread_mutex_unlock(&gl_backbuf_mutex);
@@ -324,24 +317,16 @@ void drawGLScene() {
 	}
 
 
-	//pthread_mutex_unlock(&gl_backbuf_mutex);
+	pthread_mutex_unlock(&gl_backbuf_mutex);
 	glBindTexture(GL_TEXTURE_2D, gl_depth_tex);
 	glTexImage2D(GL_TEXTURE_2D, 0, 3, 640, 480, 0, GL_RGB, GL_UNSIGNED_BYTE, (uint8_t *)depth_front);
 
-	/* visual test code
-	int asd = 0;
-
-	for(asd = 0; asd < 640*480; asd++) {
-		depth_front[asd].green += 1;
-		/*depth_front[asd].green += 2;
-		depth_front[asd].blue += 3;*/
-	//}
-
-
+	int camera_angle = 0;
 	glLoadIdentity();
 	
 	glPushMatrix();
 	glTranslatef((640.0/2.0),(480.0/2.0) ,0.0);
+	glRotatef(camera_angle, 0.0, 0.0, 1.0);
 	glTranslatef(-(640.0/2.0),-(480.0/2.0) ,0.0);
 	glBegin(GL_TRIANGLE_FAN);
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
@@ -354,13 +339,14 @@ void drawGLScene() {
 	
 	glPushMatrix();
 	glTranslatef(640+(640.0/2.0),(480.0/2.0) ,0.0);
+	glRotatef(camera_angle, 0.0, 0.0, 1.0);
 	glTranslatef(-(640+(640.0/2.0)),-(480.0/2.0) ,0.0);
 
 	glBegin(GL_TRIANGLE_FAN);
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 	glTexCoord2f(0, 1); glVertex3f(640,0,0);
-	glTexCoord2f(1, 1); glVertex3f(640,0,0);
-	glTexCoord2f(1, 0); glVertex3f(640,480,0);
+	glTexCoord2f(1, 1); glVertex3f(1280,0,0);
+	glTexCoord2f(1, 0); glVertex3f(1280,480,0);
 	glTexCoord2f(0, 0); glVertex3f(640,480,0);
 	glEnd();
 	glPopMatrix();
@@ -369,6 +355,7 @@ void drawGLScene() {
 	glutSwapBuffers();
 }
 
+//resizes the glfuncs to match the new viewport size
 void resizeGLScene(int Width, int Height) {
 	glViewport(0,0,Width,Height);
 	glMatrixMode(GL_PROJECTION);
@@ -378,16 +365,40 @@ void resizeGLScene(int Width, int Height) {
     glLoadIdentity();
 }
 
+//modifies the active range by changing the upper (0) or lower (1) bound
+//depth values increase as distance from the camera increases (ie. min->0 max->2048)
+//returns the size of the new active range
+int resizeRange(int * rbottom, int * rtop, int rdir, int dist) {
+	if(rdir = 0) {
+		*rtop += dist;
+	} else {
+		*rbottom += dist;
+	}
+
+	//ensure values stay in bounds (DEPTH_CB_RANGE default is 2048)
+	if(*rtop > DEPTH_CB_RANGE) { 
+		*rtop = DEPTH_CB_RANGE;
+	} else if(*rtop < 0) {
+		*rtop = 0;
+	}
+
+	if(*rbottom > DEPTH_CB_RANGE) {
+		*rbottom = DEPTH_CB_RANGE
+	} else if(*rbottom < 0) {
+		*rbottom = 0;
+	}
+
+	return (*rbottom - *rtop)
+}
+
 void keyPressed(unsigned char key, int x, int y) {
 	if (key == 27) {
-		//kinect cleanup disabled during GL testing
-		/*die = 1;
+		die = 1;
 		pthread_join(freenect_thread, NULL);
 		glutDestroyWindow(window);
 		free(depth_mid);
 		free(depth_front);
-		// Not pthread_exit because OSX leaves a thread lying around and doesn't exit
-		*/
+		free(frame_clone);
 		exit(0);
 	}
 	return;
