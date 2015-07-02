@@ -54,11 +54,15 @@
 #define DEFAULT_WINDOW_X 640
 #define DEFAULT_WINDOW_Y 480
 #define DEFAULT_WINDOW_TITLE "OSX Contour"
+#define DEFAULT_INIT_PATH "colour.init"
+#define DEFAULT_LINE_BUFFER_BYTES 100
+#define DEFAULT_COLOUR_CAP 16
 
 #define DEPTH_CB_X 640
 #define DEPTH_CB_Y 480
-
 #define DEPTH_CB_RANGE 2048
+
+
 /**
 		function headers
 **/
@@ -98,7 +102,6 @@ pthread_mutex_t gl_backbuf_mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t gl_frame_cond = PTHREAD_COND_INITIALIZER;
 pthread_t freenect_thread;
 
-
 freenect_context *f_ctx;
 freenect_device *f_dev;
 int freenect_led;
@@ -107,12 +110,19 @@ freenect_video_format current_format = FREENECT_VIDEO_RGB;
 
 uint16_t t_gamma[2048];
 
+colour8_t spectrum[2048];
+
+int num_colours;
+colour8_t colours[DEFAULT_COLOUR_CAP];
+float colour_weight[DEFAULT_COLOUR_CAP];
 
 int main(int argc, char ** argv){
 	//allocate blocks of heap memory for frames
 	depth_front = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
 	depth_mid = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
 	frame_clone = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
+
+	initSpectrum();
 
 	initKinect(argc, argv);
 
@@ -132,6 +142,30 @@ int main(int argc, char ** argv){
 	launchGL(argc, argv);
 
 	return 0;
+}
+
+void initSpectrum() {
+	FILE * colour_init;
+
+	//init colours from file
+	colour_init = fopen(DEFAULT_INIT_PATH, "r");
+	num_colours = 0;
+	while(num_colours < DEFAULT_COLOUR_CAP) {
+		int inp1;
+		int inp2;
+		int inp3;
+
+		if(fscanf(colour_init, "%f %d %d %d", &(colour_weight[num_colours]), &inp1, &inp2, &inp3) > 0) {
+			printf("Got colour %f - %d|%d|%d\n", colour_weight[num_colours], inp1, inp2, inp3);
+			colours[num_colours].red = (uint8_t)inp1;
+			colours[num_colours].green = (uint8_t)inp2;
+			colours[num_colours].blue = (uint8_t)inp3;
+			num_colours++;
+		} else {
+			break;
+		}
+	}
+	fclose(colour_init);
 }
 
 void initKinect(int cargc, char ** cargv) {
@@ -243,7 +277,7 @@ void depthCB(freenect_device *dev, void *v_depth, uint32_t timestamp) {
 	pthread_mutex_lock(&gl_backbuf_mutex);
 	
 	for (i=0; i<640*480; i++) {
-		val = t_gamma[depth[i]];
+		pval = t_gamma[depth[i]];
 		lb = pval & 0xff;
 		switch (pval>>8) {
 			case 0:
@@ -351,7 +385,6 @@ void drawGLScene() {
 	glEnd();
 	glPopMatrix();
 
-
 	glutSwapBuffers();
 }
 
@@ -383,12 +416,12 @@ int resizeRange(int * rbottom, int * rtop, int rdir, int dist) {
 	}
 
 	if(*rbottom > DEPTH_CB_RANGE) {
-		*rbottom = DEPTH_CB_RANGE
+		*rbottom = DEPTH_CB_RANGE;
 	} else if(*rbottom < 0) {
 		*rbottom = 0;
 	}
 
-	return (*rbottom - *rtop)
+	return (*rbottom - *rtop);
 }
 
 void keyPressed(unsigned char key, int x, int y) {
