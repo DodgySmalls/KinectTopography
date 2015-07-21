@@ -28,6 +28,7 @@
 #define GLOBAL_DEBUG
 #define GL_DEBUG
 #define RT_DEBUG
+#define INIT_DEBUG
 
 #ifdef GLOBAL_DEBUG
 #include <assert.h>
@@ -62,22 +63,6 @@
 #define DEPTH_CB_Y 480
 #define DEPTH_CB_RANGE 2048
 
-
-/**
-		function headers
-**/
-//struct colour8_t convertDepthToColour(uint16_t);
-
-void depthCB(freenect_device *, void *, uint32_t);
-void * freenectThreadfunc(void *);
-void depthCallback(freenect_device *, void *, uint32_t);
-void drawGLScene();
-void resizeGLScene(int, int);
-void launchGL(int, char **);
-void keyPressed(unsigned char, int, int);
-void * verifyMemory(void *);
-void initKinect(int, char**);
-
 /** colour8_t 
 	A glob representing a pixel colour with 8 bit RGB depth
 **/
@@ -86,6 +71,25 @@ typedef struct {
 	uint8_t green;
 	uint8_t blue;
 } colour8_t;
+
+
+/**
+		function headers
+**/
+//struct colour8_t convertDepthToColour(uint16_t);
+
+void depthCB(freenect_device*, void*, uint32_t);
+void * freenectThreadfunc(void*);
+void depthCallback(freenect_device *, void *, uint32_t);
+void drawGLScene();
+void resizeGLScene(int, int);
+void launchGL(int, char**);
+void keyPressed(unsigned char, int, int);
+void * verifyMemory(void*);
+void initKinect(int, char**);
+void generateSpectrum(colour8_t *, int, colour8_t *, float *, int);
+void initSpectrum();
+
 
 /** 
 		global variables 
@@ -108,9 +112,7 @@ int freenect_led;
 freenect_video_format requested_format = FREENECT_VIDEO_RGB;
 freenect_video_format current_format = FREENECT_VIDEO_RGB;
 
-uint16_t t_gamma[2048];
-
-colour8_t spectrum[2048];
+colour8_t spectrum[DEPTH_CB_RANGE];
 
 int num_colours;
 colour8_t colours[DEFAULT_COLOUR_CAP];
@@ -122,6 +124,7 @@ int main(int argc, char ** argv){
 	depth_mid = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
 	frame_clone = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
 
+	//spectrum = (colour8_t *)verifyMemory(malloc(DEPTH_CB_RANGE * 3));
 	initSpectrum();
 
 	initKinect(argc, argv);
@@ -132,13 +135,6 @@ int main(int argc, char ** argv){
 		return 1;
 	}
 
-			int i;
-			for (i=0; i<2048; i++) {
-				float v = i/2048.0;
-				v = powf(v, 3)* 6;
-				t_gamma[i] = v*6*256;
-			}
-
 	launchGL(argc, argv);
 
 	return 0;
@@ -146,6 +142,8 @@ int main(int argc, char ** argv){
 
 void initSpectrum() {
 	FILE * colour_init;
+
+	int gotvar = 0;
 
 	//init colours from file
 	colour_init = fopen(DEFAULT_INIT_PATH, "r");
@@ -166,6 +164,8 @@ void initSpectrum() {
 		}
 	}
 	fclose(colour_init);
+
+	generateSpectrum(&spectrum, DEPTH_CB_RANGE, &colours, &colour_weight, num_colours);
 }
 
 void initKinect(int cargc, char ** cargv) {
@@ -178,6 +178,7 @@ void initKinect(int cargc, char ** cargv) {
 	}
 
 	dev_count = freenect_num_devices (f_ctx);
+	
 	#ifdef RT_DEBUG
 	printf("Number of devices found: %d\n", dev_count);
 	#endif
@@ -276,46 +277,8 @@ void depthCB(freenect_device *dev, void *v_depth, uint32_t timestamp) {
 
 	pthread_mutex_lock(&gl_backbuf_mutex);
 	
-	for (i=0; i<640*480; i++) {
-		pval = t_gamma[depth[i]];
-		lb = pval & 0xff;
-		switch (pval>>8) {
-			case 0:
-				depth_midi[(3*i)+0] = 255;
-				depth_midi[(3*i)+1] = 255-lb;
-				depth_midi[(3*i)+2] = 255-lb;
-				break;
-			case 1:
-				depth_midi[(3*i)+0] = 255;
-				depth_midi[(3*i)+1] = lb;
-				depth_midi[(3*i)+2] = 0;
-				break;
-			case 2:
-				depth_midi[(3*i)+0] = 255-lb;
-				depth_midi[(3*i)+1] = 255;
-				depth_midi[(3*i)+2] = 0;
-				break;
-			case 3:
-				depth_midi[(3*i)+0] = 0;
-				depth_midi[(3*i)+1] = 255;
-				depth_midi[(3*i)+2] = lb;
-				break;
-			case 4:
-				depth_midi[(3*i)+0] = 0;
-				depth_midi[(3*i)+1] = 255-lb;
-				depth_midi[(3*i)+2] = 255;
-				break;
-			case 5:
-				depth_midi[(3*i)+0] = 0;
-				depth_midi[(3*i)+1] = 0;
-				depth_midi[(3*i)+2] = 255-lb;
-				break;
-			default:
-				/*depth_midi[(3*i)+0] = 0;
-				depth_midi[(3*i)+1] = 0;
-				depth_midi[(3*i)+2] = 0;*/
-				break;
-		}
+	for(i=0;i<DEPTH_CB_X * DEPTH_CB_Y;i++) {
+		depth_mid[i] = spectrum[depth[i]];
 	}
 
 	got_depth++;
@@ -422,6 +385,75 @@ int resizeRange(int * rbottom, int * rtop, int rdir, int dist) {
 	}
 
 	return (*rbottom - *rtop);
+}
+
+//generate a spectrum representing linear gradients between each breakpoint colour
+void generateSpectrum(colour8_t * dump, int size, colour8_t * breakpoints, float * colour_weights, int num_breakpoints) {
+	#ifdef INIT_DEBUG
+	printf("generateSpectrum(*dump, %d, *breakpoints, floatlist, %d)\n", size, num_breakpoints);
+	printf("colour_weights[x], 0=%f, 1=%f, 2=%f, 3=%f\n", colour_weights[0], colour_weights[1], colour_weights[2], colour_weights[3]);
+	#endif
+	//used to determine what %slice of the spectrum each gradient receives
+	float total_weight = 0;
+	//used to avoid missing integers due to imprecision, the weight algorithm is imperfect
+	int colourpos = 0;
+	//temp vars for readability
+	int r,g,b;
+	float cfr,cto;
+
+	colour8_t colour_from;
+	colour8_t colour_to;
+	colour8_t push_colour;
+
+	if (num_breakpoints <= 1){
+		//two few colours, at least two colours (and hence one gradient weight) are required, generate default spectrum in this case.
+		fprintf(stderr, "too few breakpoints specified, generating default spectrum\n");
+		//generate 255-0-0 _1.0_ 0-255-0 _1.0_ 0-0-255
+		exit(77);
+	}
+	for(int i=0;i<num_breakpoints-1;i++) {
+		total_weight+=colour_weights[i];
+	}
+	
+	for(int c=0;c<num_breakpoints-1;c++) {
+		int colour_dist = (colour_weights[c] / total_weight) * size; //the number of discrete blocks which will be subject to the gradient from colour[c] -> colour[c+1]
+		colour_to = breakpoints[c+1];
+		colour_from = breakpoints[c];
+
+		//legacy error handling and algorithm imprecision, usually several memory slots remain unallocated, likely due to truncating floats
+		if(colourpos + colour_dist > size || c == num_breakpoints-2) {
+			colour_dist = size - colourpos;
+		}
+
+		for(int i=0; i < colour_dist;i++) {
+			
+			#ifdef INIT_DEBUG 
+			assert(colourpos<size);
+			#endif
+
+			cto = ((float)i) / ((float)colour_dist);
+			cfr = 1-( ((float)i) / ((float)colour_dist) );
+
+			r = (int) ((cto * ((float)colour_to.red)) + (cfr * ((float)colour_from.red)));
+			g = (int) ((cto * ((float)colour_to.green)) + (cfr * ((float)colour_from.green)));
+			b = (int) ((cto * ((float)colour_to.blue)) + (cfr * ((float)colour_from.blue)));
+
+			(dump[colourpos]).red = (uint8_t)r;
+			(dump[colourpos]).green = (uint8_t)g;
+			(dump[colourpos]).blue = (uint8_t)b;
+			colourpos++;
+		}
+	}
+
+	#ifdef INIT_DEBUG
+	for(int i=0;i<size;i++){
+		r = (int)((dump[i]).red); 
+		g = (int)((dump[i]).green);
+		b = (int)((dump[i]).blue);
+
+		printf("colour[%d] = (%d %d %d)\n", i, (int)r, (int)g, b);
+	}
+	#endif
 }
 
 void keyPressed(unsigned char key, int x, int y) {
