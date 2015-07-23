@@ -118,6 +118,13 @@ int num_colours;
 colour8_t colours[DEFAULT_COLOUR_CAP];
 float colour_weight[DEFAULT_COLOUR_CAP];
 
+uint8_t * ghettoContourMasks;
+
+uint16_t contour_range = DEPTH_CB_RANGE;
+int contour_start = 1600;
+int num_contour_masks = 45;
+int contour_mask_range;
+
 int main(int argc, char ** argv){
 	//allocate blocks of heap memory for frames
 	depth_front = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
@@ -126,6 +133,9 @@ int main(int argc, char ** argv){
 
 	//spectrum = (colour8_t *)verifyMemory(malloc(DEPTH_CB_RANGE * 3));
 	initSpectrum();
+
+	ghettoContourMasks = (uint8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y*sizeof(uint8_t)));
+	contour_mask_range = contour_range / num_contour_masks;
 
 	initKinect(argc, argv);
 
@@ -142,8 +152,6 @@ int main(int argc, char ** argv){
 
 void initSpectrum() {
 	FILE * colour_init;
-
-	int gotvar = 0;
 
 	//init colours from file
 	colour_init = fopen(DEFAULT_INIT_PATH, "r");
@@ -269,16 +277,51 @@ void *freenectThreadfunc(void *arg) {
 //draws the frame dictated by the kinect's depth callback into depth_mid
 void depthCB(freenect_device *dev, void *v_depth, uint32_t timestamp) {
 	int i;
-	int pval;
-	int lb;
+	int p;
 	uint16_t *depth = (uint16_t*)v_depth;
-	
-	uint8_t * depth_midi = (uint8_t *)depth_mid;
 
 	pthread_mutex_lock(&gl_backbuf_mutex);
 	
 	for(i=0;i<DEPTH_CB_X * DEPTH_CB_Y;i++) {
+		//prime each pixel
 		depth_mid[i] = spectrum[depth[i]];
+		//prime the contourmasks
+		/*if(depth[i] < contour_start || depth[i] > contour_range + contour_start) {
+			ghettoContourMasks[i] = 255;
+		} else {
+			ghettoContourMasks[i] = (uint8_t)(depth[i]-contour_start / contour_mask_range);
+		}*/
+		ghettoContourMasks[i] = (uint8_t)(depth[i] / contour_mask_range);
+	}
+	
+	for(i=1; i<DEPTH_CB_Y-1; i++) {
+		for(int j=1; j<DEPTH_CB_X-1; j++){
+			p=(i*DEPTH_CB_X) + j;
+			assert(p-1 > 0);
+			if(!(ghettoContourMasks[p]==ghettoContourMasks[p-1])){
+				depth_mid[p].red = 0;
+				depth_mid[p].green = 0;
+				depth_mid[p].blue = 0;
+			}
+			assert(p+1 < DEPTH_CB_X * DEPTH_CB_Y);
+			if(!(ghettoContourMasks[p]==ghettoContourMasks[p+1])){
+				depth_mid[p].red = 0;
+				depth_mid[p].green = 0;
+				depth_mid[p].blue = 0;
+			}
+			assert(p+DEPTH_CB_X < DEPTH_CB_X * DEPTH_CB_Y);
+			if(!(ghettoContourMasks[p]==ghettoContourMasks[p+DEPTH_CB_X])){
+				depth_mid[p].red = 0;
+				depth_mid[p].green = 0;
+				depth_mid[p].blue = 0;
+			}
+			assert(p-DEPTH_CB_X > 0);
+			if(!(ghettoContourMasks[p]==ghettoContourMasks[p-DEPTH_CB_X])){
+				depth_mid[p].red = 0;
+				depth_mid[p].green = 0;
+				depth_mid[p].blue = 0;
+			}
+		}
 	}
 
 	got_depth++;
@@ -365,7 +408,7 @@ void resizeGLScene(int Width, int Height) {
 //depth values increase as distance from the camera increases (ie. min->0 max->2048)
 //returns the size of the new active range
 int resizeRange(int * rbottom, int * rtop, int rdir, int dist) {
-	if(rdir = 0) {
+	if(rdir == 0) {
 		*rtop += dist;
 	} else {
 		*rbottom += dist;
@@ -403,11 +446,11 @@ void generateSpectrum(colour8_t * dump, int size, colour8_t * breakpoints, float
 
 	colour8_t colour_from;
 	colour8_t colour_to;
-	colour8_t push_colour;
 
 	if (num_breakpoints <= 1){
 		//two few colours, at least two colours (and hence one gradient weight) are required, generate default spectrum in this case.
 		fprintf(stderr, "too few breakpoints specified, generating default spectrum\n");
+		fprintf(stderr, "code incomplete, exiting\n");
 		//generate 255-0-0 _1.0_ 0-255-0 _1.0_ 0-0-255
 		exit(77);
 	}
@@ -420,7 +463,7 @@ void generateSpectrum(colour8_t * dump, int size, colour8_t * breakpoints, float
 		colour_to = breakpoints[c+1];
 		colour_from = breakpoints[c];
 
-		//legacy error handling and algorithm imprecision, usually several memory slots remain unallocated, likely due to truncating floats
+		//legacy error handling and algorithm imprecision, usually several memory slots remain untouched, likely due to truncating floats
 		if(colourpos + colour_dist > size || c == num_breakpoints-2) {
 			colour_dist = size - colourpos;
 		}
