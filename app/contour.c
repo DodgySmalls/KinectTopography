@@ -34,7 +34,7 @@
 #include <assert.h>
 #include <inttypes.h>
 #endif
-
+ 
 //std
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +52,10 @@
 #define _USE_MATH_DEFINES
 #include <math.h>
 
+
+#include "contour.h"
+
+//default vals
 #define DEFAULT_WINDOW_X 640
 #define DEFAULT_WINDOW_Y 480
 #define DEFAULT_WINDOW_TITLE "OSX Contour"
@@ -62,33 +66,6 @@
 #define DEPTH_CB_X 640
 #define DEPTH_CB_Y 480
 #define DEPTH_CB_RANGE 2048
-
-/** colour8_t 
-	A glob representing a pixel colour with 8 bit RGB depth
-**/
-typedef struct {
-	uint8_t red;
-	uint8_t green;
-	uint8_t blue;
-} colour8_t;
-
-
-/**
-		function headers
-**/
-//struct colour8_t convertDepthToColour(uint16_t);
-
-void depthCB(freenect_device*, void*, uint32_t);
-void * freenectThreadfunc(void*);
-void depthCallback(freenect_device *, void *, uint32_t);
-void drawGLScene();
-void resizeGLScene(int, int);
-void launchGL(int, char**);
-void keyPressed(unsigned char, int, int);
-void * verifyMemory(void*);
-void initKinect(int, char**);
-void generateSpectrum(colour8_t *, int, colour8_t *, float *, int);
-void initSpectrum();
 
 
 /** 
@@ -120,9 +97,9 @@ float colour_weight[DEFAULT_COLOUR_CAP];
 
 uint8_t * ghettoContourMasks;
 
-uint16_t contour_range = DEPTH_CB_RANGE;
-int contour_start = 1600;
-int num_contour_masks = 45;
+uint16_t contour_range = 250;
+int contour_start = 500;
+int num_contour_masks = 25;
 int contour_mask_range;
 
 int main(int argc, char ** argv){
@@ -130,13 +107,12 @@ int main(int argc, char ** argv){
 	depth_front = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
 	depth_mid = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
 	frame_clone = (colour8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y * 3));
-
 	//spectrum = (colour8_t *)verifyMemory(malloc(DEPTH_CB_RANGE * 3));
 	initSpectrum();
 
 	ghettoContourMasks = (uint8_t *)verifyMemory(malloc(DEPTH_CB_X * DEPTH_CB_Y*sizeof(uint8_t)));
 	contour_mask_range = contour_range / num_contour_masks;
-
+	
 	initKinect(argc, argv);
 
 	if (pthread_create(&freenect_thread, NULL, freenectThreadfunc, NULL) != 0) {
@@ -144,14 +120,16 @@ int main(int argc, char ** argv){
 		freenect_shutdown(f_ctx);
 		return 1;
 	}
-
+	
 	launchGL(argc, argv);
 
 	return 0;
 }
 
+//TODO: remove this function, add i/o to separate file and push this code to main
+// generate spectrum can persist as it is reusable
 void initSpectrum() {
-	FILE * colour_init;
+	/*FILE * colour_init;
 
 	//init colours from file
 	colour_init = fopen(DEFAULT_INIT_PATH, "r");
@@ -161,6 +139,7 @@ void initSpectrum() {
 		int inp2;
 		int inp3;
 
+		//TODO: put i/o in separate file
 		if(fscanf(colour_init, "%f %d %d %d", &(colour_weight[num_colours]), &inp1, &inp2, &inp3) > 0) {
 			printf("Got colour %f - %d|%d|%d\n", colour_weight[num_colours], inp1, inp2, inp3);
 			colours[num_colours].red = (uint8_t)inp1;
@@ -171,7 +150,43 @@ void initSpectrum() {
 			break;
 		}
 	}
-	fclose(colour_init);
+	fclose(colour_init);*/
+	colour_weight[0] = 1;
+	colour_weight[1] = 1;
+	colour_weight[2] = 1;
+
+	num_colours = 8;
+	colours[0].red=0;
+	colours[0].green=0;
+	colours[0].blue=0;
+	
+	colours[1].red=255;
+	colours[1].green=0;
+	colours[1].blue=0;
+
+	colours[2].red=0;
+	colours[2].green=255;
+	colours[2].blue=0;
+
+	colours[3].red=0;
+	colours[3].green=0;
+	colours[3].blue=255;
+
+	colours[4].red=255;
+	colours[4].green=255;
+	colours[4].blue=0;
+
+	colours[5].red=0;
+	colours[5].green=255;
+	colours[5].blue=255;
+
+	colours[6].red=255;
+	colours[6].green=0;
+	colours[6].blue=255;
+
+	colours[7].red=255;
+	colours[7].green=255;
+	colours[7].blue=255;
 
 	generateSpectrum(&spectrum, DEPTH_CB_RANGE, &colours, &colour_weight, num_colours);
 }
@@ -286,12 +301,11 @@ void depthCB(freenect_device *dev, void *v_depth, uint32_t timestamp) {
 		//prime each pixel
 		depth_mid[i] = spectrum[depth[i]];
 		//prime the contourmasks
-		/*if(depth[i] < contour_start || depth[i] > contour_range + contour_start) {
+		if(depth[i] < contour_start || depth[i] > contour_range + contour_start) {
 			ghettoContourMasks[i] = 255;
 		} else {
-			ghettoContourMasks[i] = (uint8_t)(depth[i]-contour_start / contour_mask_range);
-		}*/
-		ghettoContourMasks[i] = (uint8_t)(depth[i] / contour_mask_range);
+			ghettoContourMasks[i] = (uint8_t)((depth[i]-contour_start)/ contour_mask_range);
+		}
 	}
 	
 	for(i=1; i<DEPTH_CB_Y-1; i++) {
@@ -385,8 +399,8 @@ void drawGLScene() {
 	glBegin(GL_TRIANGLE_FAN);
 	glColor4f(1.0f, 1.0f, 1.0f, 1.0f);
 	glTexCoord2f(0, 1); glVertex3f(640,0,0);
-	glTexCoord2f(1, 1); glVertex3f(1280,0,0);
-	glTexCoord2f(1, 0); glVertex3f(1280,480,0);
+	glTexCoord2f(1, 1); glVertex3f(640,0,0);
+	glTexCoord2f(1, 0); glVertex3f(640,480,0);
 	glTexCoord2f(0, 0); glVertex3f(640,480,0);
 	glEnd();
 	glPopMatrix();
